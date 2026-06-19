@@ -3,7 +3,7 @@ import torch.nn as nn
 from rskan import RSKAN
 
 class FullStateNonlinearityRSKAN(nn.Module):
-    def __init__(self, input_size, hidden_layers, output_size, zero_final_layer=False, **kan_kwargs):
+    def __init__(self, input_size, hidden_layers, output_size, zero_final_layer=True, **kan_kwargs):
         """
         Initializes the KAN-based nonlinearity module.
         
