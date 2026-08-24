@@ -28,7 +28,7 @@ class FullStateNonlinearityRSKAN(nn.Module):
                 final_layer.residual_scaling.zero_()
                 final_layer.subnet_scaling.zero_()
 
-    def forward(self, state=None, u=None, v=None, update_grid=False):
+    def forward(self, state=None, u=None, v=None):
         """
         Forward pass for the KAN nonlinearity.
         
@@ -36,7 +36,6 @@ class FullStateNonlinearityRSKAN(nn.Module):
             v (torch.Tensor, optional): Intermediate output. If provided, the model processes v.
             x (torch.Tensor, optional): State. Must be provided with u if v is None.
             u (torch.Tensor, optional): Input. Must be provided with x if v is None.
-            update_grid : this is not used but is kept for compatibility with the SSmodel interface. It is ignored in this implementation.
         Returns:
             Tensor: Nonlinear correction.
         """
@@ -47,34 +46,15 @@ class FullStateNonlinearityRSKAN(nn.Module):
             inp = torch.cat([state, u], dim=-1)
         elif state is not None and u is None:            
             inp = state
-
+        
         return self.kan(inp, save_activations=True)
     
-    def plot(self,u, **kwargs):
+    def plot(self, **kwargs):
         """
         Plots the KAN nonlinearity.
         
         Args:
-            u (torch.Tensor): Input sequence for simulating the state evolution.
             **kwargs: Additional keyword arguments for the plot function.
         """
-        self.kan.eval()
-        
-        input_dim = self.kan.layers[0].input_size
-        u_dim = u.shape[1] if u is not None else 0
 
-        state_dim = input_dim - u_dim
-
-        with torch.no_grad():
-            print(f"    Simulating full train sequence ({len(u)} steps)...")
-            current_state = torch.zeros(1, state_dim)
-            state_list = []
-            state_list.append(current_state.clone()) # Store x(0) guess
-            for t in range(len(u)):
-                current_input = u[t].unsqueeze(0)
-                next_state = self.forward(current_state, current_input)
-                state_list.append(next_state.clone()) # Store x(t+1)
-                current_state = next_state
-            state = torch.cat(state_list[1:])
-        self.forward(state, u)
         self.kan.plot(**kwargs)

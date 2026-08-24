@@ -14,6 +14,7 @@ class RSKANlayer(nn.Module):
         residual_connection=False,
         subnet_scaling=1.0,
         residual_scaling=1.0,
+        mask=None
     ):
         """
         A single RSKAN layer: each (input, output) pair has its own small MLP subnetwork.
@@ -40,6 +41,19 @@ class RSKANlayer(nn.Module):
         self.post_activations = None
         
         full_shape = [1] + subnetwork_hidden_shape + [1]
+
+
+        # Mask shape: [input_size, output_size]
+        if mask is None:
+            mask = torch.ones(input_size, output_size, dtype=torch.float32)
+        else:
+            mask = torch.as_tensor(mask, dtype=torch.float32)
+            assert mask.shape == (input_size, output_size), \
+                f"Mask shape {mask.shape} must match (input_size, output_size) = ({input_size}, {output_size})"
+
+        self.register_buffer('mask', mask)
+        self.register_buffer('mask_flat', self.mask.view(self.num_nets, 1, 1))
+
         
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
@@ -58,24 +72,43 @@ class RSKANlayer(nn.Module):
             self.weights.append(w)
             self.biases.append(b)
         
-
+        masked_inputs_per_output = self.mask.sum(dim=0, keepdim=True) # [1, output_size]
         if residual_connection:
+            
             if input_layer:
+                scaling_factor = residual_scaling / torch.sqrt(masked_inputs_per_output + 1e-8) # [1, output_size]
                 self.residual_scaling = nn.Parameter(
-                torch.ones(self.num_nets, 1, 1) * (residual_scaling / np.sqrt(input_size))
-            )
-            else:
-                self.residual_scaling = nn.Parameter(
-                    torch.ones(self.num_nets, 1, 1) * (residual_scaling / np.sqrt(input_size + input_size * (input_size-1)))
+                    (scaling_factor.expand(input_size, output_size) * self.mask).view(self.num_nets, 1, 1)
                 )
+                # self.residual_scaling = nn.Parameter(
+                #     torch.ones(self.num_nets, 1, 1) * (residual_scaling / np.sqrt(input_size))
+                # )
+            else:
+                scaling_factor = residual_scaling / (masked_inputs_per_output + 1e-8) # [1, output_size]
+
+                self.residual_scaling = nn.Parameter(
+                    (scaling_factor.expand(input_size, output_size) * self.mask).view(self.num_nets, 1, 1)
+                )
+                # self.residual_scaling = nn.Parameter(
+                #     torch.ones(self.num_nets, 1, 1) * (residual_scaling / np.sqrt(input_size + input_size * (input_size-1)))
+                # )
             self.subnet_scaling = nn.Parameter(
                 torch.zeros(self.num_nets, 1, 1)
             )
         else:
             self.register_buffer('residual_scaling', torch.zeros(self.num_nets, 1, 1))
+            
+            scaling_factor = subnet_scaling / torch.sqrt(masked_inputs_per_output + 1e-8) # [1, output_size]
+            # and then expand to [input_size, output_size] and flatten to [num_nets, 1, 1]
             self.subnet_scaling = nn.Parameter(
-                torch.ones(self.num_nets, 1, 1) * (subnet_scaling / np.sqrt(self.input_size))
+                (scaling_factor.expand(input_size, output_size) * self.mask).view(self.num_nets, 1, 1)
             )
+
+            # self.subnet_scaling = nn.Parameter(
+            #     torch.ones(self.num_nets, 1, 1) * (subnet_scaling / np.sqrt(self.input_size))
+            # )
+            
+
 
     @staticmethod
     def _init_scaled_weights(num_nets, out_dim, in_dim, lastLayer):
@@ -98,7 +131,7 @@ class RSKANlayer(nn.Module):
  
         return weights
     
-    def forward(self, x, save_activations=False):
+    def forward(self, x, save_activations=True):
         """
         Forward pass through all edge subnetworks, then sums contributions per output node.
 
@@ -132,6 +165,9 @@ class RSKANlayer(nn.Module):
 
         # x is currently [Num_Nets, 1, Batch] because the last layer output_dim is 1
         x = x * self.subnet_scaling + x_init * self.residual_scaling
+
+        x = x * self.mask_flat
+
         x = x.view(self.input_size, self.output_size, batch_size)
         if save_activations:
             self.post_activations = x
@@ -149,6 +185,7 @@ class RSKAN(nn.Module):
         residual_connection=False,
         subnet_scaling=1.0,
         residual_scaling=1.0,
+        masks=None
     ):
         """
         Residual Subnetwork KAN: a stack of RSKANlayers forming a full network.
@@ -175,6 +212,7 @@ class RSKAN(nn.Module):
         layers = []
 
         for i in range(len(layerSizes)-1):
+            layer_mask = masks[i] if masks is not None else None
             rskan_layer = RSKANlayer(
                 input_size=layerSizes[i],
                 output_size=layerSizes[i+1],
@@ -183,11 +221,12 @@ class RSKAN(nn.Module):
                 subnet_scaling=subnet_scaling,
                 residual_scaling=residual_scaling,
                 residual_connection=residual_connection,
+                mask=layer_mask,
             )
             layers.append(rskan_layer)
         self.layers = nn.Sequential(*layers)
 
-    def forward(self, x, save_activations=False):
+    def forward(self, x, save_activations=True):
         """
         Forward pass through all RSKAN layers sequentially.
 
@@ -231,7 +270,8 @@ class RSKAN(nn.Module):
                 reg_loss += reg_activation * torch.mean(torch.abs(layer.post_activations))
 
             if reg_entropy != 0 and layer.post_activations is not None:
-                activations = torch.abs(layer.post_activations)
+                # activations = torch.abs(layer.post_activations)
+                activations = torch.mean(torch.abs(layer.post_activations), dim=2)
                 p_input = torch.div(activations, activations.sum(dim=0, keepdim=True) + 1e-8)
                 p_output = torch.div(activations, activations.sum(dim=1, keepdim=True) + 1e-8)
                 input_entropy = -torch.sum(p_input * torch.log(p_input + 1e-8), dim=0).mean()
@@ -265,7 +305,7 @@ class RSKAN(nn.Module):
         else:
             raise ValueError(f"No activations found for layer {layer_idx}. Run forward pass with save_activations=True.")
     
-    def plot(self, folder="./figures", save_final_figure = True, attribution_score_alpha=True, scale=0.5, tick=False, sample=False, in_vars=None, out_vars=None, title=None, edge_plot_scale=1.5):
+    def plot(self, folder="./figures", save_final_figure = True, attribution_score_alpha=True, scale=0.5, tick=True, sample=False, in_vars=None, out_vars=None, title=None, edge_plot_scale=1.5):
         """
         Plot an RSKAN architecture with per-edge activation function thumbnails.
 
@@ -292,6 +332,8 @@ class RSKAN(nn.Module):
                 thumbnail images.
         """
         from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+
+        print(self.layers[0].pre_activations.var(dim=0))
 
         if attribution_score_alpha:
             for l in reversed(range(len(self.layers))):
@@ -463,3 +505,16 @@ class RSKAN(nn.Module):
         if save_final_figure:
             plt.savefig(f"{folder}/RSKAN.pdf", dpi=220)
         plt.show()
+
+# test = RSKAN(layerSizes=[3, 2, 2], 
+#              subnetwork_shape=[10, 10],
+#              residual_connection=True,
+#              masks = [
+#                 [ [0, 1],
+#                   [0, 1],
+#                   [0, 0] ],
+#                 [ [1, 1],
+#                   [1, 0]
+#                 ]
+#              ]
+#             )
