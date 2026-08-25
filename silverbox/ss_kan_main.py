@@ -14,7 +14,7 @@ import random
 import silverbox._utils as _utils
 from silverbox.data_class_SI import SystemIdentificationDataset
 from silverbox.model_state_space import StateSpaceKANModel
-from silverbox.rskanSS import FullStateNonlinearityRSKAN
+from rskanSS import FullStateNonlinearityRSKAN
 import time
 import os
 import pandas as pd

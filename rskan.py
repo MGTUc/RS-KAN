@@ -67,7 +67,7 @@ class RSKANlayer(nn.Module):
             lastLayer = i == len(full_shape) - 2
 
             w = nn.Parameter(self._init_scaled_weights(self.num_nets, out_dim, in_dim, lastLayer))
-            b = nn.Parameter(torch.zeros(self.num_nets, out_dim, 1))
+            b = nn.Parameter(torch.zeros(self.num_nets, out_dim, 1, dtype=torch.float32))
             
             self.weights.append(w)
             self.biases.append(b)
@@ -93,10 +93,10 @@ class RSKANlayer(nn.Module):
                 #     torch.ones(self.num_nets, 1, 1) * (residual_scaling / np.sqrt(input_size + input_size * (input_size-1)))
                 # )
             self.subnet_scaling = nn.Parameter(
-                torch.zeros(self.num_nets, 1, 1)
+                torch.zeros(self.num_nets, 1, 1, dtype=torch.float32)
             )
         else:
-            self.register_buffer('residual_scaling', torch.zeros(self.num_nets, 1, 1))
+            self.register_buffer('residual_scaling', torch.zeros(self.num_nets, 1, 1, dtype=torch.float32))
             
             scaling_factor = subnet_scaling / torch.sqrt(masked_inputs_per_output + 1e-8) # [1, output_size]
             # and then expand to [input_size, output_size] and flatten to [num_nets, 1, 1]
@@ -127,7 +127,7 @@ class RSKANlayer(nn.Module):
         """
         gain = np.sqrt(2.0)
         std = (gain / np.sqrt(in_dim)) if not lastLayer else (1.0 / np.sqrt(in_dim))
-        weights = torch.randn(num_nets, out_dim, in_dim) * std
+        weights = torch.randn(num_nets, out_dim, in_dim, dtype=torch.float32) * std
  
         return weights
     
