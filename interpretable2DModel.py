@@ -21,14 +21,14 @@ class Interpretable2DModel(nn.Module):
             self.register_buffer("A", torch.tensor([[1.0, 0.0], [-3.0982e+02, 4.1921e-01]], device=self.device, dtype=torch.float32))
             self.register_buffer("B", torch.tensor([[0.0], [104.0715]], device=self.device, dtype=torch.float32))
         elif case_name == "vdp":
-            self.a21 = nn.Parameter(torch.tensor(-1.3, device=self.device, dtype=torch.float32), requires_grad=True)
-            self.a22 = nn.Parameter(torch.tensor(0.3, device=self.device, dtype=torch.float32), requires_grad=True)
-            self.b2  = nn.Parameter(torch.tensor(0.3, device=self.device, dtype=torch.float32), requires_grad=True)
+            self.a21 = nn.Parameter(torch.tensor(-0.025, device=self.device, dtype=torch.float32), requires_grad=True)
+            self.a22 = nn.Parameter(torch.tensor(1.01, device=self.device, dtype=torch.float32), requires_grad=True)
+            self.b2  = nn.Parameter(torch.tensor(0.025, device=self.device, dtype=torch.float32), requires_grad=True)
 
             self.register_buffer('C', torch.tensor([[1.0, 0.0]], device=self.device, dtype=torch.float32))
             self.register_buffer('D', torch.tensor([[0.0]], device=self.device, dtype=torch.float32))
-            self.register_buffer("A", torch.tensor([[1.0, 0.0], [-1.3, 0.3]], device=self.device, dtype=torch.float32))
-            self.register_buffer("B", torch.tensor([[0.0], [0.4]], device=self.device, dtype=torch.float32))
+            self.register_buffer("A", torch.tensor([[1.0, 0.025], [-0.025, 1.01]], device=self.device, dtype=torch.float32))
+            self.register_buffer("B", torch.tensor([[0.0], [0.025]], device=self.device, dtype=torch.float32))
 
 
 

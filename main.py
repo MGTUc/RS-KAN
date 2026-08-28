@@ -6,6 +6,8 @@ from rskanSS import FullStateNonlinearityRSKAN
 from vaderpolDataset import VDPDataset
 
 # torch.autograd.set_detect_anomaly(True)
+seed = 1
+torch.manual_seed(seed)
 device = 'cpu'
 
 case_name = "vdp" # silverbox or vdp
@@ -14,56 +16,79 @@ match case_name:
     case "silverbox":
         dataset = SilverboxDataset(normalize=True)
     case "vdp":
-        dataset = VDPDataset(normalize=True)
+        dataset = VDPDataset(normalize=False)
     case _:
         raise ValueError(f"Unknown case_name: {case_name}")
 
-subnetwork_shape = [20,20]
+subnetwork_shape = [10]
 state_kan = FullStateNonlinearityRSKAN(
     2 + 1,  # input size (state_dim + control input)
     [3],
     2,  # output size (state correction dimension)
     subnetwork_shape = subnetwork_shape,
     masks = [
-        [ [1, 1, 0],
-          [1, 0, 1],
-          [0, 0, 0] ],
+        [ [1,1,0],
+          [1,0,1],
+          [0,0,0] ],
           [[0, 1],
            [0, 1],
-           [0, 1]]
+           [0, 1]
+           ]
     ],
     residual_connection=False,
-    zero_final_layer=False,
+    zero_final_layer=True,
 )
-
-model = Interpretable2DModel(device=device, case_name=case_name, dt=dataset.dt, linear_trainable=True, state_kan=state_kan).to(device)
+    # masks = [
+    #     [ [1,1,0],
+    #       [1,0,1],
+    #       [0,0,0] ],
+    #       [[0, 1],
+    #        [0, 1],
+    #        [0, 1]
+    #        ]
+    # ],
+    #     masks = [
+    #     [ [1],
+    #       [1],
+    #       [0] ],
+    #       [[0, 1]
+    #        ]
+    # ],
+model = Interpretable2DModel(device=device, case_name=case_name, dt=dataset.dt, linear_trainable=False, state_kan=state_kan).to(device)
 
 # state_dict = torch.load(f"./interpretable_models/{case_name}.pth", map_location=device)
-state_dict = torch.load(f"./interpretable_models/vdp_0.791875_500.pth", map_location=device)
+state_dict = torch.load(f"./interpretable_models/vdp_0.040905.pth", map_location=device)
 model.load_state_dict(state_dict)
 
-epochs = 150
-seq_len = 1000
-learning_rate = 1e-3
-enable_warmup = True
+epochs = 0
+seq_len = 750
+learning_rate = 1e-4
+enable_warmup = False
+max_grad_norm = 1.0
+stride_window = 20
 
 num_steps = dataset.u_train.size(0)
-batch_size = num_steps // seq_len // 15 if num_steps // seq_len // 15 > 0 else 1
-
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+# batch_size = num_steps // seq_len // 15 if num_steps // seq_len // 15 > 0 else 1
+batch_size = 128
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 loss = torch.nn.MSELoss()
 
-num_sequences = num_steps // seq_len
-if num_sequences == 0:
+if seq_len > num_steps:
     raise ValueError(f"Sequence length {seq_len} is larger than the dataset length {num_steps}.")
+if stride_window <= 0:
+    raise ValueError("stride_window must be greater than zero.")
 
-trimmed_steps = num_sequences * seq_len
-u_train_seq = dataset.u_train[:trimmed_steps].view(num_sequences, seq_len, -1)
-y_train_seq = dataset.y_train[:trimmed_steps].view(num_sequences, seq_len, -1)
+window_starts = range(0, num_steps - seq_len + 1, stride_window)
+u_train_seq = torch.stack([
+    dataset.u_train[start:start + seq_len] for start in window_starts
+]).view(-1, seq_len, dataset.u_train.shape[-1])
+y_train_seq = torch.stack([
+    dataset.y_train[start:start + seq_len] for start in window_starts
+]).view(-1, seq_len, dataset.y_train.shape[-1])
 
 train_dataset = torch.utils.data.TensorDataset(u_train_seq, y_train_seq)
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
 for epoch in range(epochs):
     model.train()
@@ -72,37 +97,58 @@ for epoch in range(epochs):
         optimizer.zero_grad()
 
         model_output = []
-        state = torch.zeros((u_batch.size(0), 2), device=device, dtype=torch.float32)
+        # state = torch.zeros((u_batch.size(0), 2), device=device, dtype=torch.float32)
+        # state = torch.tensor([[2.0, 0.0]] * u_batch.size(0), device=device, dtype=torch.float32)
+        # x1_0 = y_batch[:, 0, 0]
+        # x2_0 = (y_batch[:, 1, 0] - y_batch[:, 0, 0]) / dataset.dt
+
+        # central difference approximation for x2_0
+        x1_0 = y_batch[:, 1, 0]
+        x2_0 = (y_batch[:, 2, 0] - y_batch[:, 0, 0]) / (2 * dataset.dt)
+
+
+        state = torch.stack([x1_0, x2_0], dim=1).to(device)
+
 
         warmup_window = dataset.warmup_window if enable_warmup else 0
         if warmup_window >= seq_len:
             raise ValueError("warmup_window must be smaller than seq_len")
 
-        for t in range(u_batch.size(1)):
+        for t in range(1, u_batch.size(1)):
             u_t = u_batch[:, t, :]
             next_state, y_pred = model(state, u_t)
+            next_state = torch.clamp(next_state, min=-100.0, max=100.0)
+            if not torch.isfinite(next_state).all() or not torch.isfinite(y_pred).all():
+                print(f"Non-finite rollout at epoch {epoch+1}, batch {batch_idx+1}, step {t+1}. Skipping this batch.")
+                model_output = None
+                break
             model_output.append(y_pred)
             state = next_state
 
-        model_output = torch.stack(model_output, dim=1)
-        loss_value = loss(model_output[:, warmup_window:], y_batch[:, warmup_window:])
-        if torch.isinf(loss_value).any():
-            print(f"Inf loss encountered at epoch {epoch+1}, batch {batch_idx+1}. Skipping this batch.")
-            continue
-        if torch.isnan(loss_value).any():
-            print(f"NaN loss encountered at epoch {epoch+1}, batch {batch_idx+1}. Skipping this batch.")
+        if model_output is None:
             continue
 
+        model_output = torch.stack(model_output, dim=1)
+        loss_value = loss(model_output[:, warmup_window:], y_batch[:, 1+warmup_window:])
+        if not torch.isfinite(loss_value):
+            print(f"Non-finite loss at epoch {epoch+1}, batch {batch_idx+1}. Skipping this batch.")
+            continue
 
         loss_value.backward()
+        gradient_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        if not torch.isfinite(gradient_norm):
+            print(f"Non-finite gradients at epoch {epoch+1}, batch {batch_idx+1}. Skipping this batch.")
+            optimizer.zero_grad()
+            continue
+
         optimizer.step()
+        if not all(torch.isfinite(parameter).all() for parameter in model.parameters()):
+            print(f"Non-finite parameters after epoch {epoch+1}, batch {batch_idx+1}. Stopping training.")
+            raise FloatingPointError("Optimizer produced non-finite model parameters.")
         epoch_loss += loss_value.item()
 
     # scheduler.step()
     print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss/len(train_loader)}")
-    if (epoch + 1) % 500 == 0:
-        torch.save(model.state_dict(), f"./interpretable_models/{case_name}_{epoch_loss/len(train_loader):.6f}.pth")
-        print(f"Model saved after epoch {epoch+1}")
 
     if (epoch + 1) % 99999 == 0:
         model.eval()
@@ -122,7 +168,10 @@ for epoch in range(epochs):
 #print denormalized test and train RMSE
 model.eval()
 with torch.no_grad():
-    test_state = torch.zeros((1, 2), device=device, dtype=torch.float32)
+    # test_state = torch.zeros((1, 2), device=device, dtype=torch.float32)
+    x1_0 = dataset.y_test[1, 0]
+    x2_0 = (dataset.y_test[2, 0] - dataset.y_test[0, 0]) / (2 * dataset.dt)
+    test_state = torch.tensor([[x1_0, x2_0]], device=device, dtype=torch.float32)
     test_output = []
     for t in range(dataset.u_test.size(0)):
         u_t = dataset.u_test[t].unsqueeze(0)
@@ -157,7 +206,7 @@ with torch.no_grad():
     # rmse_train = torch.sqrt(torch.mean((y_pred_train_denorm - y_true_train_denorm) ** 2))
     # print(f"Denormalized train RMSE: {rmse_train.item()}")
 
-torch.save(model.state_dict(), f"./interpretable_models/{case_name}_{epoch_loss/len(train_loader):.6f}.pth")
+torch.save(model.state_dict(), f"./interpretable_models/{case_name}_{rmse.item():.6f}.pth")
 print(f"eigenvalues of A: {torch.linalg.eigvals(model.A)}")
 print(model.A)
 print(model.B)
