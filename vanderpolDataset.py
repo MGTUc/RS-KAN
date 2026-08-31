@@ -2,9 +2,9 @@ import pandas as pd
 import torch
 
 class VDPDataset:
-    def __init__(self, normalize=True):
+    def __init__(self, csv_path,normalize=True):
         # Load the data from the CSV file
-        data = pd.read_csv('data/vanderpolDataFree.csv')
+        data = pd.read_csv(csv_path)
 
         # Extract the input and output columns
         self.u = torch.tensor(data['u'].values, dtype=torch.float32).view(-1, 1)  # Ensure u is a column vector
@@ -12,12 +12,9 @@ class VDPDataset:
 
         self.dt = data['time'][1] - data['time'][0]
 
-        self.warmup_window = 50
-
-        x1 = torch.tensor(data['x1'].values, dtype=torch.float32).view(-1, 1)
-        x2 = torch.tensor(data['x2'].values, dtype=torch.float32).view(-1, 1)
-        print(f"x1 mean: {x1.mean()}, x1 std: {x1.std()}")
-        print(f"x2 mean: {x2.mean()}, x2 std: {x2.std()}")
+        self.warmup_window = 0
+        self.x1 = torch.tensor(data['x1'].values, dtype=torch.float32).view(-1, 1)
+        self.x2 = torch.tensor(data['x2'].values, dtype=torch.float32).view(-1, 1)
 
         if normalize:
             self.u_mean, self.u_std = self.u[:-1500,0].mean(), self.u.std()
@@ -39,3 +36,9 @@ class VDPDataset:
 
             self.u_test = self.u[-1500:]
             self.y_test = self.y[-1500:]
+
+        self.u_plot = self.u_test[1:]
+        self.y_plot = self.y_test[1:]
+        x1_plot = self.y_test[1,0]
+        x2_plot = (self.y_test[2] - self.y_test[0]) / (2 * self.dt)
+        self.starting_state_plot = torch.tensor([[x1_plot, x2_plot]], dtype=torch.float32)

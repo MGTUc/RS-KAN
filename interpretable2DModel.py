@@ -21,9 +21,9 @@ class Interpretable2DModel(nn.Module):
             self.register_buffer("A", torch.tensor([[1.0, 0.0], [-3.0982e+02, 4.1921e-01]], device=self.device, dtype=torch.float32))
             self.register_buffer("B", torch.tensor([[0.0], [104.0715]], device=self.device, dtype=torch.float32))
         elif case_name == "vdp":
-            self.a21 = nn.Parameter(torch.tensor(-0.025, device=self.device, dtype=torch.float32), requires_grad=True)
-            self.a22 = nn.Parameter(torch.tensor(1.01, device=self.device, dtype=torch.float32), requires_grad=True)
-            self.b2  = nn.Parameter(torch.tensor(0.025, device=self.device, dtype=torch.float32), requires_grad=True)
+            self.a21 = nn.Parameter(torch.tensor(0, device=self.device, dtype=torch.float32), requires_grad=True)
+            self.a22 = nn.Parameter(torch.tensor(1, device=self.device, dtype=torch.float32), requires_grad=True)
+            self.b2  = nn.Parameter(torch.tensor(0, device=self.device, dtype=torch.float32), requires_grad=True)
 
             self.register_buffer('C', torch.tensor([[1.0, 0.0]], device=self.device, dtype=torch.float32))
             self.register_buffer('D', torch.tensor([[0.0]], device=self.device, dtype=torch.float32))
@@ -69,27 +69,40 @@ class Interpretable2DModel(nn.Module):
 
         return next_state, next_y
 
-    def plot(self, u, warmup_window=0, **kwargs):
+    def plot(self, u, starting_state, warmup_window=0, **kwargs):
         """
         Plots the interpretable model's dynamics.
-        
+
         Args:
-            u (Tensor): Control input [seq_len, input_dim].
+            u (Tensor): Control input, [seq_len, input_dim] for a single trajectory or
+                [seq_len, batch, input_dim] for several trajectories rolled out in
+                parallel (one per row of starting_state).
+            starting_state (Tensor): Initial state(s) [batch, state_dim].
             warmup_window (int): Number of initial time steps to exclude from plotting.
             **kwargs: Additional keyword arguments for the plot function.
         """
+        batched = u.dim() == 3
 
         with torch.no_grad():
-            current_state = torch.zeros(1, 2, dtype=torch.float32)
+            current_state = starting_state.clone()
             state_list = []
-            state_list.append(current_state.clone()) 
-            for t in range(len(u)):
-                current_input = u[t].unsqueeze(0)
+            state_list.append(current_state.clone())
+            for t in range(u.size(0)):
+                current_input = u[t] if batched else u[t].unsqueeze(0)
                 next_state, _ = self.forward(current_state, current_input)
                 state_list.append(next_state.clone())
                 current_state = next_state
-            state = torch.cat(state_list[1:])
-        self.forward(state[warmup_window:], u[warmup_window:])  # Forward pass to save activations for plotting
+            state = torch.stack(state_list[1:], dim=0) if batched else torch.cat(state_list[1:])
+
+        if batched:
+            # Flatten [seq_len, batch, dim] -> [seq_len*batch, dim], pairing each
+            # trajectory's own rolled-out state with its own input at each step.
+            state_for_activations = state[warmup_window:].reshape(-1, state.shape[-1])
+            u_for_activations = u[warmup_window:].reshape(-1, u.shape[-1])
+        else:
+            state_for_activations = state[warmup_window:]
+            u_for_activations = u[warmup_window:]
+        self.forward(state_for_activations, u_for_activations)  # Forward pass to save activations for plotting
 
         if self.state_kan is not None:
             self.state_kan.plot(**kwargs)

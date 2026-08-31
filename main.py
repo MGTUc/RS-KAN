@@ -3,40 +3,86 @@ from interpretable2DModel import Interpretable2DModel
 from silverboxDataset import SilverboxDataset
 from tqdm import tqdm
 from rskanSS import FullStateNonlinearityRSKAN
-from vaderpolDataset import VDPDataset
+from vanderpolDataset import VDPDataset
+from test_bench import free_run_x1_nrmse
 
 # torch.autograd.set_detect_anomaly(True)
 seed = 1
 torch.manual_seed(seed)
-device = 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+epochs = 100
+seq_len = 1000
+learning_rate = 1e-3
+enable_warmup = False
+lr_warmup_epochs = 5
+max_grad_norm = 1.0
+stride_window = 50
+batch_size = 16
+report_loss_curve = True
 
 case_name = "vdp" # silverbox or vdp
 
 match case_name:
     case "silverbox":
         dataset = SilverboxDataset(normalize=True)
+        window_starts = range(0, num_steps - seq_len + 1, stride_window)
+        u_train_seq = torch.stack([
+            dataset.u_train[start:start + seq_len] for start in window_starts
+        ]).view(-1, seq_len, dataset.u_train.shape[-1])
+        y_train_seq = torch.stack([
+            dataset.y_train[start:start + seq_len] for start in window_starts
+        ]).view(-1, seq_len, dataset.y_train.shape[-1])
+
+
     case "vdp":
-        dataset = VDPDataset(normalize=False)
+        all_u_windows, all_y_windows = [], []
+
+        datasetFree = VDPDataset(csv_path='data/vanderpolDataFree.csv', normalize=False)
+        datasetSine = VDPDataset(csv_path='data/vanderpolDataSine.csv', normalize=False)
+        datasetMultisine = VDPDataset(csv_path='data/vanderpolDataMultisine.csv', normalize=False)
+        datasetSweep = VDPDataset(csv_path='data/vanderpolDataSweep.csv', normalize=False)
+
+        datasets = [datasetFree, datasetSine, datasetMultisine, datasetSweep]
+        dataset = datasets[0]  # reference for dt/warmup_window/normalization stats, shared across all 4 files
+
+        for ds in datasets:
+            num_steps = ds.u_train.size(0)
+            starts = range(0, num_steps - seq_len + 1, stride_window)
+            all_u_windows.append(torch.stack([ds.u_train[s:s+seq_len] for s in starts]))
+            all_y_windows.append(torch.stack([ds.y_train[s:s+seq_len] for s in starts]))
+
+        u_train_seq = torch.cat(all_u_windows, dim=0)
+        y_train_seq = torch.cat(all_y_windows, dim=0)
     case _:
         raise ValueError(f"Unknown case_name: {case_name}")
 
-subnetwork_shape = [10]
+train_dataset = torch.utils.data.TensorDataset(u_train_seq, y_train_seq)
+train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+num_steps = dataset.u_train.size(0)
+if seq_len > num_steps:
+    raise ValueError(f"Sequence length {seq_len} is larger than the dataset length {num_steps}.")
+if stride_window <= 0:
+    raise ValueError("stride_window must be greater than zero.")
+
+
+subnetwork_shape = [32]
 state_kan = FullStateNonlinearityRSKAN(
     2 + 1,  # input size (state_dim + control input)
-    [3],
+    [2],
     2,  # output size (state correction dimension)
     subnetwork_shape = subnetwork_shape,
     masks = [
-        [ [1,1,0],
-          [1,0,1],
-          [0,0,0] ],
+        [ [1,1],
+          [1,1],
+          [0,0] ],
           [[0, 1],
            [0, 1],
-           [0, 1]
            ]
     ],
     residual_connection=False,
-    zero_final_layer=True,
+    zero_final_layer=False,
 )
     # masks = [
     #     [ [1,1,0],
@@ -54,41 +100,28 @@ state_kan = FullStateNonlinearityRSKAN(
     #       [[0, 1]
     #        ]
     # ],
-model = Interpretable2DModel(device=device, case_name=case_name, dt=dataset.dt, linear_trainable=False, state_kan=state_kan).to(device)
+model = Interpretable2DModel(device=device, case_name=case_name, dt=dataset.dt, linear_trainable=True, state_kan=state_kan).to(device)
 
 # state_dict = torch.load(f"./interpretable_models/{case_name}.pth", map_location=device)
-state_dict = torch.load(f"./interpretable_models/vdp_0.040905.pth", map_location=device)
-model.load_state_dict(state_dict)
+# state_dict = torch.load(f"./interpretable_models/vdp_0.0832_0.0444_0.0656_0.0593_[32]good2mask2noresidual.pth", map_location=device)
+# model.load_state_dict(state_dict)
 
-epochs = 0
-seq_len = 750
-learning_rate = 1e-4
-enable_warmup = False
-max_grad_norm = 1.0
-stride_window = 20
-
-num_steps = dataset.u_train.size(0)
-# batch_size = num_steps // seq_len // 15 if num_steps // seq_len // 15 > 0 else 1
-batch_size = 128
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+    optimizer, start_factor=1e-3, end_factor=1.0, total_iters=lr_warmup_epochs
+)
+cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer, T_max=epochs - lr_warmup_epochs
+)
+scheduler = torch.optim.lr_scheduler.SequentialLR(
+    optimizer,
+    schedulers=[warmup_scheduler, cosine_scheduler],
+    milestones=[lr_warmup_epochs],
+)
 loss = torch.nn.MSELoss()
+# loss = torch.nn.HuberLoss(reduction='mean', delta=0.1)
 
-if seq_len > num_steps:
-    raise ValueError(f"Sequence length {seq_len} is larger than the dataset length {num_steps}.")
-if stride_window <= 0:
-    raise ValueError("stride_window must be greater than zero.")
-
-window_starts = range(0, num_steps - seq_len + 1, stride_window)
-u_train_seq = torch.stack([
-    dataset.u_train[start:start + seq_len] for start in window_starts
-]).view(-1, seq_len, dataset.u_train.shape[-1])
-y_train_seq = torch.stack([
-    dataset.y_train[start:start + seq_len] for start in window_starts
-]).view(-1, seq_len, dataset.y_train.shape[-1])
-
-train_dataset = torch.utils.data.TensorDataset(u_train_seq, y_train_seq)
-train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+loss_curve = []
 
 for epoch in range(epochs):
     model.train()
@@ -97,6 +130,8 @@ for epoch in range(epochs):
         optimizer.zero_grad()
 
         model_output = []
+        diverged = torch.zeros(u_batch.size(0), dtype=torch.bool, device=device)
+        valid_mask = []
         # state = torch.zeros((u_batch.size(0), 2), device=device, dtype=torch.float32)
         # state = torch.tensor([[2.0, 0.0]] * u_batch.size(0), device=device, dtype=torch.float32)
         # x1_0 = y_batch[:, 0, 0]
@@ -117,19 +152,36 @@ for epoch in range(epochs):
         for t in range(1, u_batch.size(1)):
             u_t = u_batch[:, t, :]
             next_state, y_pred = model(state, u_t)
-            next_state = torch.clamp(next_state, min=-100.0, max=100.0)
+            next_state = torch.clamp(next_state, min=-1000.0, max=1000.0)
+            # next_state = 1000.0 * torch.tanh(next_state / 1000.0)
             if not torch.isfinite(next_state).all() or not torch.isfinite(y_pred).all():
                 print(f"Non-finite rollout at epoch {epoch+1}, batch {batch_idx+1}, step {t+1}. Skipping this batch.")
                 model_output = None
                 break
+
+
+
+            newly_diverged = (next_state.abs() > 10.0).any(dim=1)
+            diverged = diverged | newly_diverged
+            valid_mask.append(~diverged)
+
             model_output.append(y_pred)
-            state = next_state
+            state = torch.where(diverged.unsqueeze(-1), state.detach(), next_state)
 
         if model_output is None:
             continue
 
         model_output = torch.stack(model_output, dim=1)
-        loss_value = loss(model_output[:, warmup_window:], y_batch[:, 1+warmup_window:])
+        valid_mask = torch.stack(valid_mask, dim=1)
+        # loss_value = loss(model_output[:, warmup_window:], y_batch[:, 1+warmup_window:])
+
+        sequence_error = (model_output[:, warmup_window:] - y_batch[:, 1+warmup_window:]) ** 2
+        n_valid = valid_mask[:, warmup_window:].sum(dim=1)
+        seq_ok = n_valid > 0
+
+        per_sequence_loss = (sequence_error * valid_mask[:, warmup_window:].unsqueeze(-1)).sum(dim=1) / n_valid.clamp(min=1)
+        loss_value = per_sequence_loss[seq_ok].mean() if seq_ok.any() else torch.tensor(0.0, device=device)
+
         if not torch.isfinite(loss_value):
             print(f"Non-finite loss at epoch {epoch+1}, batch {batch_idx+1}. Skipping this batch.")
             continue
@@ -146,70 +198,33 @@ for epoch in range(epochs):
             print(f"Non-finite parameters after epoch {epoch+1}, batch {batch_idx+1}. Stopping training.")
             raise FloatingPointError("Optimizer produced non-finite model parameters.")
         epoch_loss += loss_value.item()
-
-    # scheduler.step()
+        if report_loss_curve:
+            loss_curve.append(loss_value.item())
+    scheduler.step()
     print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss/len(train_loader)}")
 
-    if (epoch + 1) % 99999 == 0:
-        model.eval()
-        with torch.no_grad():
-            test_state = torch.zeros((1, 2), device=device, dtype=torch.float32)
-            test_output = []
-            for t in range(dataset.u_test.size(0)):
-                u_t = dataset.u_test[t].unsqueeze(0)
-                next_state, y_pred = model(test_state, u_t)
-                test_output.append(y_pred)
-                test_state = next_state
+if report_loss_curve:
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(10, 5))
+    plt.plot(loss_curve)
+    plt.title("Training Loss Curve")
+    plt.xlabel("Batch")
+    plt.ylabel("Loss")
+    plt.grid()
+    plt.savefig(f"./figures/{case_name}_loss_curve.png")
 
-            test_output = torch.cat(test_output, dim=0)
-            test_loss_value = loss(test_output, dataset.y_test)
-            print(f"Test Loss after epoch {epoch+1}: {test_loss_value.item()}")
+test_results = free_run_x1_nrmse(model, dataset)
+print(test_results)
 
-#print denormalized test and train RMSE
-model.eval()
-with torch.no_grad():
-    # test_state = torch.zeros((1, 2), device=device, dtype=torch.float32)
-    x1_0 = dataset.y_test[1, 0]
-    x2_0 = (dataset.y_test[2, 0] - dataset.y_test[0, 0]) / (2 * dataset.dt)
-    test_state = torch.tensor([[x1_0, x2_0]], device=device, dtype=torch.float32)
-    test_output = []
-    for t in range(dataset.u_test.size(0)):
-        u_t = dataset.u_test[t].unsqueeze(0)
-        next_state, y_pred = model(test_state, u_t)
-        test_output.append(y_pred)
-        test_state = next_state
+name = f"{test_results['free']:.4f}_{test_results['sine']:.4f}_{test_results['multisine']:.4f}_{test_results['sweep']:.4f}"
 
-    test_output = torch.cat(test_output, dim=0)
-
-    warmup_window = dataset.warmup_window if enable_warmup else 0
-    # Denormalize the predictions and true values
-    y_pred_denorm = test_output[warmup_window:] * dataset.y_std + dataset.y_mean
-    y_true_denorm = dataset.y_test[warmup_window:] * dataset.y_std + dataset.y_mean
-
-    rmse = torch.sqrt(torch.mean((y_pred_denorm - y_true_denorm) ** 2))
-    print(f"Denormalized test RMSE: {rmse.item()}")
-
-    # train_state = torch.zeros((dataset.u_train.size(0), 2), device=device, dtype=torch.float32)
-    # train_output = []
-    # for t in range(dataset.u_train.size(1)):
-    #     u_t = dataset.u_train[:, t].unsqueeze(1)
-    #     next_state, y_pred = model(train_state, u_t)
-    #     train_output.append(y_pred)
-    #     train_state = next_state
-
-    # train_output = torch.stack(train_output, dim=1)
-
-    # # Denormalize the predictions and true values
-    # y_pred_train_denorm = train_output * dataset.y_std + dataset.y_mean
-    # y_true_train_denorm = dataset.y_train * dataset.y_std + dataset.y_mean
-
-    # rmse_train = torch.sqrt(torch.mean((y_pred_train_denorm - y_true_train_denorm) ** 2))
-    # print(f"Denormalized train RMSE: {rmse_train.item()}")
-
-torch.save(model.state_dict(), f"./interpretable_models/{case_name}_{rmse.item():.6f}.pth")
+torch.save(model.state_dict(), f"./interpretable_models/{case_name}_{name}_{subnetwork_shape}.pth")
 print(f"eigenvalues of A: {torch.linalg.eigvals(model.A)}")
 print(model.A)
 print(model.B)
 print(model.C)
 print(model.D)
-model.plot(dataset.u_test, warmup_window=dataset.warmup_window, attribution_score_alpha = False, sample=True, tick=True, folder="./figures")
+# print(model.state_dict())
+u_plot = torch.stack([d.u_plot for d in datasets], dim=1)  # [T, num_datasets, input_dim]
+starting_state_plot = torch.cat([d.starting_state_plot for d in datasets], dim=0)  # [num_datasets, state_dim]
+model.plot(u_plot, starting_state=starting_state_plot, warmup_window=dataset.warmup_window, attribution_score_alpha = True, sample=False, tick=True, folder="./figures")

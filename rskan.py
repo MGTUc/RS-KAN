@@ -305,9 +305,12 @@ class RSKAN(nn.Module):
         else:
             raise ValueError(f"No activations found for layer {layer_idx}. Run forward pass with save_activations=True.")
     
-    def plot(self, folder="./figures", save_final_figure = True, attribution_score_alpha=True, scale=0.5, tick=True, sample=False, in_vars=None, out_vars=None, title=None, edge_plot_scale=1.5):
+    def plot(self, folder="./figures", save_final_figure = True, attribution_score_alpha=True, scale=0.5, tick=True, sample=False, in_vars=None, out_vars=None, title=None, edge_plot_scale=1.5, dpi=400):
         """
         Plot an RSKAN architecture with per-edge activation function thumbnails.
+
+        Only edges with mask == 1 are plotted; masked-out edges are skipped entirely
+        (no thumbnail, no connecting line).
 
         Requires a prior forward pass with save_activations=True.
 
@@ -330,6 +333,10 @@ class RSKAN(nn.Module):
                 title is shown.
             edge_plot_scale (float): Additional size multiplier applied only to the edge
                 thumbnail images.
+            dpi (int): Raster resolution used both for the individual edge thumbnails and
+                the final assembled figure. The embedded thumbnails are raster images, so
+                unlike the vector node/line elements they only stay sharp when zoomed into
+                the PDF if this is high enough; raised from the old fixed 220 default.
         """
         from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 
@@ -339,7 +346,7 @@ class RSKAN(nn.Module):
             for l in reversed(range(len(self.layers))):
                 for i in range(self.layerSizes[l]):
                     for j in range(self.layerSizes[l + 1]):
-                        self.edge_attribution_scores[l][i][j] = self.node_attribution_scores[l+1][j] * (torch.std(self.layers[l].post_activations[i, j, :])/(torch.std((self.layers[l].post_activations[:,j,:]).sum(dim=0))) + 1e-8).item()
+                        self.edge_attribution_scores[l][i][j] = self.node_attribution_scores[l+1][j] * (torch.std(self.layers[l].post_activations[i, j, :])/(torch.std((self.layers[l].post_activations[:,j,:]).sum(dim=0)) + 1e-8)).item()
                     self.node_attribution_scores[l][i] = sum(self.edge_attribution_scores[l][i][j] for j in range(self.layerSizes[l + 1]))
                     
 
@@ -365,10 +372,15 @@ class RSKAN(nn.Module):
         os.makedirs(folder, exist_ok=True)
 
         depth = len(self.layerSizes) - 1
-        thumbnail_zoom = max(0.06, 0.16 * scale * edge_plot_scale)
+        # thumbnail_zoom controls on-page physical size and was tuned assuming dpi=220;
+        # rescale it so raising dpi increases embedded pixel density without changing layout.
+        thumbnail_zoom = max(0.06, 0.16 * scale * edge_plot_scale) * (220.0 / dpi)
         for l in range(depth):
+            layer_mask = self.layers[l].mask
             for i in range(self.layerSizes[l]):
                 for j in range(self.layerSizes[l + 1]):
+                    if layer_mask[i, j].item() == 0:
+                        continue
                     rank = torch.argsort(self.layers[l].pre_activations[:, i])
                     x_vals = self.layers[l].pre_activations[:, i][rank].detach().cpu().numpy()
                     y_vals = self.layers[l].post_activations[i, j, :][rank].detach().cpu().numpy()
@@ -401,7 +413,7 @@ class RSKAN(nn.Module):
                         spine.set_color("black")
                         spine.set_linewidth(1.0)
 
-                    fig_edge.savefig(f"{folder}/sp_{l}_{i}_{j}.png", dpi=220)
+                    fig_edge.savefig(f"{folder}/sp_{l}_{i}_{j}.png", dpi=dpi)
                     plt.close(fig_edge)
 
         width = self.layerSizes
@@ -457,7 +469,12 @@ class RSKAN(nn.Module):
             y_mid = 0.5 * (y_bottom + y_top)
             n_in = width[l]
             n_out = width[l + 1]
-            n_edges = n_in * n_out
+            layer_mask = self.layers[l].mask
+            active_edges = [(i, j) for i in range(n_in) for j in range(n_out) if layer_mask[i, j].item() != 0]
+            n_edges = len(active_edges)
+
+            if n_edges == 0:
+                continue
 
             if n_edges == 1:
                 x_strip = np.array([0.5])
@@ -465,34 +482,31 @@ class RSKAN(nn.Module):
                 x_strip = np.linspace(0.08, 0.92, n_edges)
             thumb_centers = {}
 
-            for i in range(n_in):
-                for j in range(n_out):
-                    edge_id = i * n_out + j
-                    x_img = x_strip[edge_id]
-                    y_img = y_mid
-                    thumb_centers[(i, j)] = (x_img, y_img)
+            for edge_id, (i, j) in enumerate(active_edges):
+                x_img = x_strip[edge_id]
+                y_img = y_mid
+                thumb_centers[(i, j)] = (x_img, y_img)
 
-                    img_path = f"{folder}/sp_{l}_{i}_{j}.png"
-                    im = plt.imread(img_path)
+                img_path = f"{folder}/sp_{l}_{i}_{j}.png"
+                im = plt.imread(img_path)
 
-                    image_box = OffsetImage(im, zoom=thumbnail_zoom)
-                    ann = AnnotationBbox(image_box, (x_img, y_img), frameon=False, xycoords='data')
-                    ax.add_artist(ann)
+                image_box = OffsetImage(im, zoom=thumbnail_zoom)
+                ann = AnnotationBbox(image_box, (x_img, y_img), frameon=False, xycoords='data')
+                ax.add_artist(ann)
 
             y_gap = 0.055
-            for i in range(n_in):
-                for j in range(n_out):
-                    x_bottom = x_node_pos[l][i]
-                    x_top = x_node_pos[l + 1][j]
-                    x_img, y_img = thumb_centers[(i, j)]
+            for i, j in active_edges:
+                x_bottom = x_node_pos[l][i]
+                x_top = x_node_pos[l + 1][j]
+                x_img, y_img = thumb_centers[(i, j)]
 
-                    edge_alpha = self.edge_attribution_scores[l][i][j]
-                    if attribution_score_alpha:
-                        ax.plot([x_bottom, x_img], [y_bottom, y_img - y_gap], color="black", lw=2, alpha=edge_alpha)
-                        ax.plot([x_img, x_top], [y_img + y_gap, y_top], color="black", lw=2, alpha=edge_alpha)
-                    else:
-                        ax.plot([x_bottom, x_img], [y_bottom, y_img - y_gap], color="black", lw=2)
-                        ax.plot([x_img, x_top], [y_img + y_gap, y_top], color="black", lw=2)
+                edge_alpha = self.edge_attribution_scores[l][i][j]
+                if attribution_score_alpha:
+                    ax.plot([x_bottom, x_img], [y_bottom, y_img - y_gap], color="black", lw=2, alpha=edge_alpha)
+                    ax.plot([x_img, x_top], [y_img + y_gap, y_top], color="black", lw=2, alpha=edge_alpha)
+                else:
+                    ax.plot([x_bottom, x_img], [y_bottom, y_img - y_gap], color="black", lw=2)
+                    ax.plot([x_img, x_top], [y_img + y_gap, y_top], color="black", lw=2)
 
         ax.set_xlim(0.0, 1.0)
         ax.set_ylim(-0.08, 1.08)
@@ -503,7 +517,7 @@ class RSKAN(nn.Module):
 
         fig.tight_layout()
         if save_final_figure:
-            plt.savefig(f"{folder}/RSKAN.pdf", dpi=220)
+            plt.savefig(f"{folder}/RSKAN.pdf", dpi=dpi)
         plt.show()
 
 # test = RSKAN(layerSizes=[3, 2, 2], 
