@@ -43,7 +43,7 @@ DATA_FILES = {
     "sweep": "data/vanderpolDataSweep.csv",
 }
 TEST_LEN = 1500  # must match the split used in main.py
-SUBNETWORK_SHAPE = [32]  # must match the shape used in main.py
+SUBNETWORK_SHAPE = [45]  # must match the shape used in main.py
 FILE_NAME = "./interpretable_models/vdp_0.0516_0.0623_0.0720_0.0587_[20].pth"
 
 # ----------------------------------------------------------------------------
@@ -66,11 +66,11 @@ def build_vdp_model(dataset, device=DEVICE):
              [0, 1]],
         ],
         residual_connection=False,
-        zero_final_layer=True,
+        zero_final_layer=False,
     )
     return Interpretable2DModel(
         device=device, case_name="vdp", dt=dataset.dt,
-        linear_trainable=False, state_kan=state_kan,
+        linear_trainable=True, state_kan=state_kan,
     ).to(device)
 
 

@@ -11,8 +11,8 @@ seed = 1
 torch.manual_seed(seed)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-epochs = 100
-seq_len = 1000
+epochs = 360
+seq_len = 2000
 learning_rate = 1e-3
 enable_warmup = False
 lr_warmup_epochs = 5
@@ -67,7 +67,7 @@ if stride_window <= 0:
     raise ValueError("stride_window must be greater than zero.")
 
 
-subnetwork_shape = [32]
+subnetwork_shape = [45]
 state_kan = FullStateNonlinearityRSKAN(
     2 + 1,  # input size (state_dim + control input)
     [2],
