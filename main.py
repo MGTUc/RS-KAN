@@ -11,14 +11,14 @@ seed = 1
 torch.manual_seed(seed)
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-epochs = 360
-seq_len = 2000
-learning_rate = 1e-3
+epochs = 200
+seq_len = 3000
+learning_rate = 1e-4
 enable_warmup = False
 lr_warmup_epochs = 5
 max_grad_norm = 1.0
-stride_window = 50
-batch_size = 16
+stride_window = 300
+batch_size = 4
 report_loss_curve = True
 
 case_name = "vdp" # silverbox or vdp
@@ -103,8 +103,8 @@ state_kan = FullStateNonlinearityRSKAN(
 model = Interpretable2DModel(device=device, case_name=case_name, dt=dataset.dt, linear_trainable=True, state_kan=state_kan).to(device)
 
 # state_dict = torch.load(f"./interpretable_models/{case_name}.pth", map_location=device)
-# state_dict = torch.load(f"./interpretable_models/vdp_0.0832_0.0444_0.0656_0.0593_[32]good2mask2noresidual.pth", map_location=device)
-# model.load_state_dict(state_dict)
+state_dict = torch.load(f"./interpretable_models/vdp_0.0356_0.0107_0.0245_0.0243_[45]mask2noreslintrainable8.pth", map_location=device)
+model.load_state_dict(state_dict)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=0)
 warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
