@@ -12,15 +12,22 @@ class Interpretable2DModel(nn.Module):
         self.state_kan = state_kan
 
         if case_name == "silverbox":
-            self.a21 = nn.Parameter(torch.tensor(-3.0982e+02, device=self.device, dtype=torch.float32), requires_grad=True)
-            self.a22 = nn.Parameter(torch.tensor(4.1921e-01, device=self.device, dtype=torch.float32), requires_grad=True)
-            self.b2  = nn.Parameter(torch.tensor(104.0715, device=self.device, dtype=torch.float32), requires_grad=True)
+            # Dimensionless time: x2 := dt * dy/dt, i.e. the per-sample increment of y,
+            # so A[0,1] = 1 instead of dt. With physical dt the silverbox resonance
+            # (69 Hz) forces std(x2)/std(x1) ~ 390 and a21 ~ -288, which neither Adam
+            # nor the KAN can reach from an O(1) initialisation. In this basis the
+            # optimum is a21=-0.473, a22=0.462, b2=0.166 and both states are O(1).
+            self.h = 1.0
+            self.a21 = nn.Parameter(torch.tensor(0.0, device=self.device, dtype=torch.float32), requires_grad=True)
+            self.a22 = nn.Parameter(torch.tensor(1.0, device=self.device, dtype=torch.float32), requires_grad=True)
+            self.b2  = nn.Parameter(torch.tensor(0.0, device=self.device, dtype=torch.float32), requires_grad=True)
 
             self.register_buffer('C', torch.tensor([[1.0, 0.0]], device=self.device, dtype=torch.float32))
             self.register_buffer('D', torch.tensor([[0.0]], device=self.device, dtype=torch.float32))
-            self.register_buffer("A", torch.tensor([[1.0, 0.0], [-3.0982e+02, 4.1921e-01]], device=self.device, dtype=torch.float32))
-            self.register_buffer("B", torch.tensor([[0.0], [104.0715]], device=self.device, dtype=torch.float32))
+            self.register_buffer("A", torch.tensor([[1.0, self.h], [0.0, 0.9]], device=self.device, dtype=torch.float32))
+            self.register_buffer("B", torch.tensor([[0.0], [0.0]], device=self.device, dtype=torch.float32))
         elif case_name == "vdp":
+            self.h = self.dt  # vdp is already well-scaled at physical dt (std(x2)/std(x1) ~ 1)
             self.a21 = nn.Parameter(torch.tensor(0, device=self.device, dtype=torch.float32), requires_grad=True)
             self.a22 = nn.Parameter(torch.tensor(1, device=self.device, dtype=torch.float32), requires_grad=True)
             self.b2  = nn.Parameter(torch.tensor(0, device=self.device, dtype=torch.float32), requires_grad=True)
@@ -47,7 +54,7 @@ class Interpretable2DModel(nn.Module):
         """
         if self.linear_trainable:
             A = torch.stack([
-                torch.stack([torch.tensor(1.0, device=self.device, dtype=torch.float32), torch.tensor(self.dt, device=self.device, dtype=torch.float32)]),
+                torch.stack([torch.tensor(1.0, device=self.device, dtype=torch.float32), torch.tensor(self.h, device=self.device, dtype=torch.float32)]),
                 torch.stack([self.a21, self.a22]),
             ])
             B = torch.stack([

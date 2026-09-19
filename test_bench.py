@@ -16,7 +16,7 @@ For each trajectory it reports:
 It also runs two structure-specific interpretability checks:
   - a symbolic polynomial fit of every active KAN edge (degree + R^2)
   - a direct comparison of the learned state-correction surface against the
-    hypothesized 2*x1^2*x2 identity ((x1^2+x2)^2 - x1^4 - x2^2), fitting the best
+    hypothesized x1^2*x2 + x2 identity, fitting the best
     scalar multiplier and reporting how much of the surface it explains.
 
 Run: python test_bench.py --model ./interpretable_models/vdp_0.040905.pth
@@ -344,7 +344,7 @@ def symbolic_edge_report(kan, max_degree=2, r2_threshold=0.995):
 
 def multiplication_identity_check(model, out_dir, x1_range=(-3, 3), x2_range=(-3, 3), n=60, device=DEVICE):
     """Compares the learned x2-state-correction surface against the hypothesized
-    2*x1^2*x2 identity ((x1^2+x2)^2 - x1^4 - x2^2), fitting the best scalar multiplier."""
+    c1*(x1^2*x2) + c2*x2 identity, fitting the best-fit coefficients c1, c2."""
     x1 = torch.linspace(*x1_range, n)
     x2 = torch.linspace(*x2_range, n)
     X1, X2 = torch.meshgrid(x1, x2, indexing="ij")
@@ -357,20 +357,24 @@ def multiplication_identity_check(model, out_dir, x1_range=(-3, 3), x2_range=(-3
     corr_x2 = correction[:, 1].reshape(n, n).cpu().numpy()
 
     X1n, X2n = X1.numpy(), X2.numpy()
-    target = X1n ** 2 * X2n
-    c = float(np.sum(corr_x2 * target) / (np.sum(target * target) + 1e-12))
-    resid = corr_x2 - c * target
+    term1 = X1n ** 2 * X2n
+    term2 = X2n
+    basis = np.stack([term1.reshape(-1), term2.reshape(-1)], axis=-1)  # [n*n, 2]
+    coeffs, _, _, _ = np.linalg.lstsq(basis, corr_x2.reshape(-1), rcond=None)
+    c1, c2 = float(coeffs[0]), float(coeffs[1])
+    fitted = c1 * term1 + c2 * term2
+    resid = corr_x2 - fitted
     ss_res = np.sum(resid ** 2)
     ss_tot = np.sum((corr_x2 - corr_x2.mean()) ** 2) + 1e-12
     r2 = 1.0 - ss_res / ss_tot
 
-    print("\n--- Multiplication identity check (learned x2-correction vs c * x1^2 * x2) ---")
-    print(f"  best-fit c = {c:.5f}, R^2 = {r2:.4f}")
+    print("\n--- Multiplication identity check (learned x2-correction vs c1*(x1^2*x2) + c2*x2) ---")
+    print(f"  best-fit c1 = {c1:.5f}, c2 = {c2:.5f}, R^2 = {r2:.4f}")
 
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.2))
     for ax, data_, title in zip(
-        axes, [corr_x2, c * target, resid],
-        ["learned correction", f"c * x1^2 * x2  (c={c:.4f})", "residual"],
+        axes, [corr_x2, fitted, resid],
+        ["learned correction", f"c1*(x1^2*x2) + c2*x2  (c1={c1:.4f}, c2={c2:.4f})", "residual"],
     ):
         im = ax.pcolormesh(X1n, X2n, data_, shading="auto", cmap="RdBu_r",
                             vmin=-np.abs(corr_x2).max(), vmax=np.abs(corr_x2).max())
@@ -384,7 +388,7 @@ def multiplication_identity_check(model, out_dir, x1_range=(-3, 3), x2_range=(-3
     fig.savefig(os.path.join(out_dir, "multiplication_identity_check.png"), dpi=160)
     plt.close(fig)
 
-    return c, r2
+    return c1, c2, r2
 
 
 # ----------------------------------------------------------------------------
